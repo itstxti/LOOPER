@@ -100,3 +100,10 @@ Looper currently supports **MP3 files**.
 Loop detection is based on frequency-domain analysis and correlation, so the detected point is an automatically estimated loop rather than a guarantee of musical perfection for every track.
 
 Analysis time depends on the length and complexity of the audio file.
+
+## Third-Party Software
+
+Looper uses [mpg123](https://www.mpg123.de/) for MP3 decoding.
+
+mpg123 is free software licensed under the GNU Lesser General Public License
+(LGPL) version 2.1.
