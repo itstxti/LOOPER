@@ -101,9 +101,9 @@ Loop detection is based on frequency-domain analysis and correlation, so the det
 
 Analysis time depends on the length and complexity of the audio file.
 
-## Third-Party Software
+## License
 
-Looper uses [mpg123](https://www.mpg123.de/) for MP3 decoding.
+Looper is licensed under the MIT License.
 
-mpg123 is free software licensed under the GNU Lesser General Public License
-(LGPL) version 2.1.
+Looper also includes mpg123, which is licensed under the GNU Lesser General
+Public License (LGPL) version 2.1.
