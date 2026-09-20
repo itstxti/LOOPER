@@ -1,6 +1,6 @@
 # Looper
 
-**Looper** is a desktop application for detecting seamless loop points in MP3 files.
+**Looper** is a desktop application for detecting, previewing, and exporting music loops from MP3 files.
 
 It analyzes the frequency characteristics of an audio track, searches for sections with similar frequency patterns, and identifies a potential loop point. The detected loop can then be previewed and exported as a new MP3 file.
 
