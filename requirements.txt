@@ -1,0 +1,3 @@
+mpg123
+numpy
+pygame
