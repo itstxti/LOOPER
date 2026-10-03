@@ -27,8 +27,7 @@ Looper detects suitable loop points in MP3 files by combining spectral analysis 
 6. The strongest candidates are refined by comparing the transitions between the end and beginning of the loop.
 7. The candidate points are further refined at the **sample level** using the original waveform.
 8. Candidates are scored based on spectral similarity and transition quality.
-9. The detected loop can be previewed directly in the application.
-10. The selected loop can be exported as a separate MP3 file using **FFmpeg**.
+9. The detected loop can be previewed directly in the application and exported as a separate MP3 file using **FFmpeg**.
 
 ## Tech Stack
 
