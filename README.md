@@ -58,15 +58,13 @@ cd Looper
 Create a virtual environment:
 
 ```bash
-python -m venv .venv
+py -3.12 -m venv .venv
 ```
 
 Activate it:
 
-**PowerShell:**
-
-```powershell
-.\.venv\Scripts\Activate.ps1
+```bash
+.\.venv\Scripts\activate
 ```
 
 Install the Python dependencies:
