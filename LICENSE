@@ -19,3 +19,15 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+
+Third-Party Software
+--------------------
+
+Looper includes mpg123 for MP3 decoding.
+
+mpg123 is free software licensed under the GNU Lesser General Public License
+(LGPL) version 2.1.
+
+The mpg123 components included in this repository are subject to their
+respective license and copyright notices.
