@@ -38,7 +38,7 @@ Looper uses the following process:
 
 ## Requirements
 
-* Python 3.10+
+* Python 3.12
 * Windows
 * FFmpeg
 
@@ -53,10 +53,26 @@ git clone https://github.com/itstxti/Looper.git
 cd Looper
 ```
 
+### Python environment
+
+Create a virtual environment:
+
+```bash
+python -m venv .venv
+```
+
+Activate it:
+
+**PowerShell:**
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+```
+
 Install the Python dependencies:
 
 ```bash
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 ```
 
 ### FFmpeg
@@ -69,7 +85,7 @@ You can verify the installation with:
 ffmpeg -version
 ```
 
-If you don't have it install, the easiest option is using WinGet:
+If you don't have it installed, the easiest option on Windows is using WinGet:
 
 ```bash
 winget install Gyan.FFmpeg
