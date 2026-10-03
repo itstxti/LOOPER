@@ -17,15 +17,18 @@ It analyzes the frequency characteristics of an audio track, searches for sectio
 
 ## How It Works
 
-Looper uses the following process:
+Looper detects suitable loop points in MP3 files by combining spectral analysis with waveform-level refinement.
 
-1. The MP3 file is decoded using **mpg123**.
-2. Audio frames are analyzed using **NumPy**.
-3. Frequency information is extracted using Fast Fourier Transform (FFT).
-4. The application searches for sections with similar frequency patterns.
-5. Correlation is used to determine the strongest potential loop point.
-6. The detected section can be previewed.
-7. The loop can be exported as a separate MP3 file using **FFmpeg**.
+1. The MP3 file is decoded into PCM audio using **mpg123**.
+2. Stereo audio is converted to mono for analysis.
+3. The audio is divided into overlapping windows and analyzed using **Fast Fourier Transform (FFT)**.
+4. Spectral and RMS features are extracted from each window.
+5. Looper searches for sections with similar spectral patterns over time.
+6. The strongest candidates are refined by comparing the transitions between the end and beginning of the loop.
+7. The candidate points are further refined at the **sample level** using the original waveform.
+8. Candidates are scored based on spectral similarity and transition quality.
+9. The detected loop can be previewed directly in the application.
+10. The selected loop can be exported as a separate MP3 file using **FFmpeg**.
 
 ## Tech Stack
 
