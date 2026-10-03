@@ -1,7 +1,9 @@
 import os
 import sys
 import subprocess
-import shutil
+
+import numpy as np
+
 
 # =========================================================
 # MPG123 DLL SETUP
@@ -46,7 +48,6 @@ if sys.platform == "win32":
     os.environ["OUT123_MODULE"] = "win32"
 
 
-import numpy as np
 from mpg123 import Mpg123, Out123
 
 
@@ -56,7 +57,10 @@ from mpg123 import Mpg123, Out123
 
 class MusicFile:
 
-    def __init__(self, filename):
+    def __init__(
+        self,
+        filename
+    ):
 
         if not os.path.exists(filename):
             raise FileNotFoundError(
@@ -83,7 +87,9 @@ class MusicFile:
             )
         )
 
-        print("Decoding MP3...")
+        print(
+            "Decoding MP3..."
+        )
 
         self.frames = list(
             mp3.iter_frames()
@@ -102,77 +108,356 @@ class MusicFile:
             f"{self.channels} channel(s)"
         )
 
+        # Filled by the audio analysis stage.
+        self.audio_samples = None
+        self.spectral_features = None
+        self.rms = None
+        self.feature_times = None
+
+        self.analysis_window_size = None
+        self.analysis_hop_size = None
+
+        self.frame_start_samples = None
+
+
     # =====================================================
-    # FREQUENCY ANALYSIS
+    # DECODE TO MONO
     # =====================================================
 
-    def calculate_max_frequencies(
+    def _decode_mono(
+        self
+    ):
+        """
+        Convert the decoded PCM frames into a mono
+        float32 signal.
+
+        The original MP3 channel structure is preserved
+        during decoding and then converted to mono.
+        """
+
+        if not self.frames:
+            raise ValueError(
+                "The MP3 file contains no audio frames."
+            )
+
+        pcm = np.frombuffer(
+            b"".join(
+                self.frames
+            ),
+            dtype=np.int16
+        )
+
+        if pcm.size == 0:
+            raise ValueError(
+                "The MP3 file contains no PCM samples."
+            )
+
+        if self.channels > 1:
+
+            usable_samples = (
+                pcm.size
+                - (
+                    pcm.size
+                    % self.channels
+                )
+            )
+
+            pcm = pcm[
+                :usable_samples
+            ]
+
+            pcm = pcm.reshape(
+                -1,
+                self.channels
+            )
+
+            pcm = pcm.mean(
+                axis=1
+            )
+
+        pcm = (
+            pcm.astype(
+                np.float32
+            )
+            / 32768.0
+        )
+
+        return pcm
+
+
+    # =====================================================
+    # BUILD FRAME SAMPLE INDEX
+    # =====================================================
+
+    def _build_frame_sample_index(
+        self
+    ):
+        """
+        Build a mapping between mpg123 frame indices
+        and decoded PCM sample positions.
+        """
+
+        starts = np.empty(
+            len(self.frames),
+            dtype=np.int64
+        )
+
+        current_sample = 0
+
+        for index, frame in enumerate(
+            self.frames
+        ):
+
+            starts[index] = (
+                current_sample
+            )
+
+            # Frame data contains int16 samples.
+            total_values = (
+                len(frame)
+                // 2
+            )
+
+            if self.channels > 1:
+
+                frame_samples = (
+                    total_values
+                    // self.channels
+                )
+
+            else:
+
+                frame_samples = (
+                    total_values
+                )
+
+            current_sample += (
+                frame_samples
+            )
+
+        self.frame_start_samples = (
+            starts
+        )
+
+
+    # =====================================================
+    # AUDIO ANALYSIS
+    # =====================================================
+
+    def calculate_audio_features(
         self,
         progress_callback=None
     ):
+        """
+        Analyse the track using STFT spectral features
+        and RMS energy.
+        """
 
         print()
-        print("Analyzing frequencies...")
+        print(
+            "Analyzing audio..."
+        )
 
         if progress_callback:
+
             progress_callback(
                 10,
-                "Analyzing frequencies..."
+                "Analyzing audio..."
             )
 
-        frame_ffts = []
+        # -------------------------------------------------
+        # Decode PCM
+        # -------------------------------------------------
 
-        start_frame = 1
-        end_frame = len(self.frames) - 2
+        self.audio_samples = (
+            self._decode_mono()
+        )
+
+        if len(
+            self.audio_samples
+        ) < 4096:
+
+            raise ValueError(
+                "The MP3 file does not contain enough audio data."
+            )
+
+        # -------------------------------------------------
+        # Frame/sample mapping
+        # -------------------------------------------------
+
+        self._build_frame_sample_index()
+
+        # -------------------------------------------------
+        # STFT configuration
+        # -------------------------------------------------
+
+        window_size = 2048
+        hop_size = 512
+
+        self.analysis_window_size = (
+            window_size
+        )
+
+        self.analysis_hop_size = (
+            hop_size
+        )
+
+        # -------------------------------------------------
+        # Hann window
+        # -------------------------------------------------
+
+        window = np.hanning(
+            window_size
+        ).astype(
+            np.float32
+        )
+
+        # -------------------------------------------------
+        # Number of analysis frames
+        # -------------------------------------------------
 
         total_frames = (
-            end_frame - start_frame
+            1
+            +
+            (
+                len(self.audio_samples)
+                - window_size
+            )
+            // hop_size
         )
 
         if total_frames <= 0:
+
             raise ValueError(
-                "The MP3 file does not contain enough frames."
+                "The MP3 file is too short for audio analysis."
             )
 
-        for index, i in enumerate(
-            range(
-                start_frame,
-                end_frame
-            ),
-            start=1
+        spectral_features = []
+        rms_values = []
+
+        # -------------------------------------------------
+        # Frequency bins
+        # -------------------------------------------------
+
+        frequencies = np.fft.rfftfreq(
+            window_size,
+            d=1.0 / self.rate
+        )
+
+        frequency_mask = (
+            frequencies >= 40.0
+        )
+
+        progress_step = max(
+            1,
+            total_frames // 20
+        )
+
+        # -------------------------------------------------
+        # STFT
+        # -------------------------------------------------
+
+        for frame_index in range(
+            total_frames
         ):
 
-            arr = np.frombuffer(
-                self.frames[i],
-                dtype=np.int16
+            start = (
+                frame_index
+                * hop_size
             )
 
-            arr = arr[::self.channels]
-
-            frame_fft = np.abs(
-                np.fft.rfft(arr)
+            end = (
+                start
+                + window_size
             )
 
-            frame_ffts.append(
-                frame_fft
+            samples = (
+                self.audio_samples[
+                    start:end
+                ]
             )
 
-            progress_step = max(
-                1,
-                total_frames // 20
+            windowed = (
+                samples
+                * window
             )
+
+            # ---------------------------------------------
+            # RMS
+            # ---------------------------------------------
+
+            rms = np.sqrt(
+                np.mean(
+                    windowed ** 2
+                )
+                + 1e-12
+            )
+
+            rms_values.append(
+                rms
+            )
+
+            # ---------------------------------------------
+            # FFT
+            # ---------------------------------------------
+
+            spectrum = np.abs(
+                np.fft.rfft(
+                    windowed
+                )
+            )
+
+            spectrum = spectrum[
+                frequency_mask
+            ]
+
+            # ---------------------------------------------
+            # Log compression
+            # ---------------------------------------------
+
+            spectrum = np.log1p(
+                spectrum
+            )
+
+            # ---------------------------------------------
+            # Normalize spectral shape
+            # ---------------------------------------------
+
+            norm = np.linalg.norm(
+                spectrum
+            )
+
+            if norm > 0:
+
+                spectrum = (
+                    spectrum
+                    / norm
+                )
+
+            spectral_features.append(
+                spectrum
+            )
+
+            # ---------------------------------------------
+            # Progress
+            # ---------------------------------------------
 
             if (
-                index % progress_step == 0
-                or index == total_frames
+                frame_index % progress_step == 0
+                or frame_index == total_frames - 1
             ):
 
                 progress = (
-                    index / total_frames
+                    frame_index
+                    /
+                    max(
+                        1,
+                        total_frames - 1
+                    )
                 ) * 100
 
                 print(
-                    f"\rAnalyzing frequencies: "
+                    f"\rAnalyzing audio: "
                     f"{progress:6.1f}%",
                     end="",
                     flush=True
@@ -187,194 +472,317 @@ class MusicFile:
 
                     progress_callback(
                         gui_progress,
-                        "Analyzing frequencies..."
+                        "Analyzing audio..."
                     )
 
         print()
 
-        fft_2d = np.stack(
-            frame_ffts
+        # -------------------------------------------------
+        # Store analysis
+        # -------------------------------------------------
+
+        self.spectral_features = np.asarray(
+            spectral_features,
+            dtype=np.float32
         )
 
-        frame_freq = np.fft.rfftfreq(
-            len(arr)
+        self.rms = np.asarray(
+            rms_values,
+            dtype=np.float32
         )
 
-        clip_start = 1
-        clip_end = 25
-
-        frame_freq_sub = frame_freq[
-            clip_start:clip_end
-        ]
-
-        fft_2d_sub = fft_2d[
-            :,
-            clip_start:clip_end
-        ]
-
-        fft_2d_denoise = np.ma.masked_where(
-            (
-                fft_2d_sub.T
-                <
-                fft_2d_sub.max() * 0.25
-            ),
-            fft_2d_sub.T,
-            0
-        )
-
-        max_freq = frame_freq_sub[
-            np.argmax(
-                fft_2d_denoise,
-                axis=0
+        self.feature_times = (
+            np.arange(
+                total_frames
             )
-        ]
-
-        self.max_freq = np.ma.masked_where(
-            max_freq == frame_freq_sub[0],
-            max_freq
+            * hop_size
+            / self.rate
         )
 
         print(
-            f"Frequency analysis complete: "
-            f"{len(self.max_freq):,} samples."
+            "Audio analysis complete: "
+            f"{len(self.spectral_features):,} samples."
         )
 
+
     # =====================================================
-    # CORRELATION
+    # SEGMENT SIMILARITY
     # =====================================================
 
-    def sig_corr(
+    def segment_similarity(
         self,
-        s1,
-        s2,
-        comp_length
+        start_a,
+        start_b,
+        length
     ):
+        """
+        Compare two audio segments using their spectral
+        features and RMS energy.
 
-        return np.corrcoef(
-            self.max_freq[
-                s1:s1 + comp_length
-            ],
-            self.max_freq[
-                s2:s2 + comp_length
+        Higher score means greater similarity.
+        """
+
+        end_a = (
+            start_a
+            + length
+        )
+
+        end_b = (
+            start_b
+            + length
+        )
+
+        if (
+            end_a
+            > len(self.spectral_features)
+            or
+            end_b
+            > len(self.spectral_features)
+        ):
+
+            return -1.0
+
+        features_a = (
+            self.spectral_features[
+                start_a:end_a
             ]
-        )[1, 0]
+        )
+
+        features_b = (
+            self.spectral_features[
+                start_b:end_b
+            ]
+        )
+
+        # -------------------------------------------------
+        # Spectral similarity
+        # -------------------------------------------------
+
+        spectral_similarity = np.mean(
+            np.sum(
+                features_a
+                * features_b,
+                axis=1
+            )
+        )
+
+        # -------------------------------------------------
+        # RMS similarity
+        # -------------------------------------------------
+
+        rms_a = (
+            self.rms[
+                start_a:end_a
+            ]
+        )
+
+        rms_b = (
+            self.rms[
+                start_b:end_b
+            ]
+        )
+
+        rms_a_mean = (
+            np.mean(
+                rms_a
+            )
+            + 1e-8
+        )
+
+        rms_b_mean = (
+            np.mean(
+                rms_b
+            )
+            + 1e-8
+        )
+
+        rms_ratio = (
+            min(
+                rms_a_mean,
+                rms_b_mean
+            )
+            /
+            max(
+                rms_a_mean,
+                rms_b_mean
+            )
+        )
+
+        # -------------------------------------------------
+        # Combined score
+        # -------------------------------------------------
+
+        score = (
+            spectral_similarity * 0.8
+            +
+            rms_ratio * 0.2
+        )
+
+        return float(
+            score
+        )
+
 
     # =====================================================
-    # PERCENTAGE MATCH
+    # FIND LOOP CANDIDATES
     # =====================================================
 
-    def pct_match(
+    def find_loop_candidates(
         self,
-        s1,
-        s2,
-        comp_length
-    ):
-
-        matches = (
-            self.max_freq[
-                s1:s1 + comp_length
-            ]
-            ==
-            self.max_freq[
-                s2:s2 + comp_length
-            ]
-        )
-
-        count = np.ma.count(
-            matches
-        )
-
-        if count == 0:
-            return 0
-
-        return (
-            np.ma.sum(matches)
-            / count
-        )
-
-    # =====================================================
-    # FIND LOOP POINT
-    # =====================================================
-
-    def find_loop_point(
-        self,
-        start_offset=200,
-        test_len=500,
+        comparison_seconds=2.0,
+        minimum_loop_seconds=5.0,
+        maximum_candidates=10,
         progress_callback=None
     ):
+        """
+        Find the strongest repeated sections in the track.
+
+        Returns:
+
+            [
+                (
+                    similarity,
+                    start_feature,
+                    end_feature
+                ),
+                ...
+            ]
+        """
 
         print()
-        print("Searching for loop point...")
+        print(
+            "Searching for loop candidates..."
+        )
 
         if progress_callback:
+
             progress_callback(
                 55,
-                "Searching for loop point..."
+                "Searching for loop candidates..."
             )
 
-        max_corr = 0
+        feature_rate = (
+            self.rate
+            /
+            self.analysis_hop_size
+        )
 
-        best_start = None
-        best_end = None
+        comparison_length = max(
+            1,
+            int(
+                comparison_seconds
+                * feature_rate
+            )
+        )
+
+        minimum_loop_length = max(
+            comparison_length,
+            int(
+                minimum_loop_seconds
+                * feature_rate
+            )
+        )
+
+        total_features = len(
+            self.spectral_features
+        )
+
+        if total_features <= (
+            minimum_loop_length
+            + comparison_length
+        ):
+
+            return []
+
+        # -------------------------------------------------
+        # Candidate start points
+        # -------------------------------------------------
 
         start_step = max(
             1,
             int(
-                len(self.max_freq) / 10
+                total_features
+                / 100
             )
         )
 
         starts = list(
             range(
-                start_offset,
-                len(self.max_freq)
-                - test_len,
+                0,
+                total_features
+                - minimum_loop_length
+                - comparison_length,
                 start_step
             )
         )
 
-        total_starts = len(starts)
+        total_starts = len(
+            starts
+        )
 
-        if total_starts == 0:
-            return (
-                None,
-                None,
-                0
+        candidates = []
+
+        # Compare end positions approximately every second.
+        end_step = max(
+            1,
+            int(
+                feature_rate
             )
+        )
+
+        # -------------------------------------------------
+        # Search
+        # -------------------------------------------------
 
         for start_index, start in enumerate(
             starts,
             start=1
         ):
 
+            end_min = (
+                start
+                + minimum_loop_length
+            )
+
             for end in range(
-                start + 500,
-                len(self.max_freq)
-                - test_len
+                end_min,
+                total_features
+                - comparison_length,
+                end_step
             ):
 
-                sc = self.sig_corr(
+                score = self.segment_similarity(
                     start,
                     end,
-                    test_len
+                    comparison_length
                 )
 
-                if (
-                    np.isfinite(sc)
-                    and sc > max_corr
-                ):
+                if score <= 0:
+                    continue
 
-                    best_start = start
-                    best_end = end
-                    max_corr = sc
+                candidates.append(
+                    (
+                        score,
+                        start,
+                        end
+                    )
+                )
+
+            # ---------------------------------------------
+            # Progress
+            # ---------------------------------------------
 
             progress = (
                 start_index
-                / total_starts
+                /
+                max(
+                    1,
+                    total_starts
+                )
             ) * 100
 
             print(
-                f"\rSearching loop point: "
+                f"\rSearching candidates: "
                 f"{progress:6.1f}%",
                 end="",
                 flush=True
@@ -389,16 +797,657 @@ class MusicFile:
 
                 progress_callback(
                     gui_progress,
-                    "Searching for loop point..."
+                    "Searching for loop candidates..."
                 )
 
         print()
 
+        # -------------------------------------------------
+        # Sort
+        # -------------------------------------------------
+
+        candidates.sort(
+            key=lambda candidate: candidate[0],
+            reverse=True
+        )
+
+        # -------------------------------------------------
+        # Remove near-duplicate candidates
+        # -------------------------------------------------
+
+        filtered = []
+
+        minimum_distance = int(
+            feature_rate
+            * 2.0
+        )
+
+        for candidate in candidates:
+
+            score, start, end = (
+                candidate
+            )
+
+            too_close = False
+
+            for (
+                _,
+                existing_start,
+                existing_end
+            ) in filtered:
+
+                if (
+                    abs(
+                        start
+                        - existing_start
+                    )
+                    < minimum_distance
+                    and
+                    abs(
+                        end
+                        - existing_end
+                    )
+                    < minimum_distance
+                ):
+
+                    too_close = True
+                    break
+
+            if not too_close:
+
+                filtered.append(
+                    candidate
+                )
+
+            if len(
+                filtered
+            ) >= maximum_candidates:
+
+                break
+
+        print(
+            f"Found {len(filtered)} "
+            f"loop candidates."
+        )
+
+        return filtered
+
+
+    # =====================================================
+    # TRANSITION SCORE
+    # =====================================================
+
+    def transition_score(
+        self,
+        start,
+        end,
+        window_seconds=0.25
+    ):
+        """
+        Measure how smoothly the end of a loop connects
+        back to its beginning.
+
+        Lower score means a better transition.
+        """
+
+        feature_rate = (
+            self.rate
+            /
+            self.analysis_hop_size
+        )
+
+        window = max(
+            1,
+            int(
+                window_seconds
+                * feature_rate
+            )
+        )
+
+        if (
+            start < window
+            or end < window
+            or start + window
+                >= len(self.spectral_features)
+            or end >= len(self.spectral_features)
+        ):
+
+            return float("inf")
+
+        # -------------------------------------------------
+        # Spectral transition
+        # -------------------------------------------------
+
+        start_features = (
+            self.spectral_features[
+                start:start + window
+            ]
+        )
+
+        end_features = (
+            self.spectral_features[
+                end - window:end
+            ]
+        )
+
+        spectral_difference = np.mean(
+            np.abs(
+                start_features
+                - end_features
+            )
+        )
+
+        # -------------------------------------------------
+        # RMS transition
+        # -------------------------------------------------
+
+        start_rms = (
+            self.rms[
+                start:start + window
+            ]
+        )
+
+        end_rms = (
+            self.rms[
+                end - window:end
+            ]
+        )
+
+        rms_difference = np.mean(
+            np.abs(
+                start_rms
+                - end_rms
+            )
+        )
+
+        rms_scale = (
+            np.mean(
+                self.rms
+            )
+            + 1e-8
+        )
+
+        rms_difference /= (
+            rms_scale
+        )
+
+        # -------------------------------------------------
+        # Combined score
+        # -------------------------------------------------
+
+        return float(
+            spectral_difference * 0.8
+            +
+            rms_difference * 0.2
+        )
+
+
+    # =====================================================
+    # REFINE LOOP CANDIDATE
+    # =====================================================
+
+    def refine_loop_candidate(
+        self,
+        start,
+        end,
+        search_seconds=1.0,
+        step_seconds=0.05
+    ):
+        """
+        Refine an approximate loop candidate using
+        spectral transition similarity.
+        """
+
+        feature_rate = (
+            self.rate
+            /
+            self.analysis_hop_size
+        )
+
+        search_radius = max(
+            1,
+            int(
+                search_seconds
+                * feature_rate
+            )
+        )
+
+        step = max(
+            1,
+            int(
+                step_seconds
+                * feature_rate
+            )
+        )
+
+        best_start = start
+        best_end = end
+
+        best_score = float(
+            "inf"
+        )
+
+        # -------------------------------------------------
+        # Search local neighbourhood
+        # -------------------------------------------------
+
+        for start_offset in range(
+            -search_radius,
+            search_radius + 1,
+            step
+        ):
+
+            refined_start = (
+                start
+                + start_offset
+            )
+
+            if refined_start < 1:
+                continue
+
+            for end_offset in range(
+                -search_radius,
+                search_radius + 1,
+                step
+            ):
+
+                refined_end = (
+                    end
+                    + end_offset
+                )
+
+                if (
+                    refined_end
+                    <= refined_start
+                ):
+                    continue
+
+                score = (
+                    self.transition_score(
+                        refined_start,
+                        refined_end
+                    )
+                )
+
+                if score < best_score:
+
+                    best_score = score
+
+                    best_start = (
+                        refined_start
+                    )
+
+                    best_end = (
+                        refined_end
+                    )
+
         return (
             best_start,
             best_end,
-            max_corr
+            best_score
         )
+
+
+    # =====================================================
+    # SAMPLE-LEVEL TRANSITION SCORE
+    # =====================================================
+
+    def sample_transition_score(
+        self,
+        start_sample,
+        end_sample,
+        window_seconds=0.08
+    ):
+        """
+        Compare the end of the loop directly against
+        its beginning using the original PCM waveform.
+
+        Lower score means a smoother transition.
+        """
+
+        window_samples = max(
+            1,
+            int(
+                window_seconds
+                * self.rate
+            )
+        )
+
+        if (
+            start_sample < window_samples
+            or end_sample < window_samples
+            or
+            start_sample
+            + window_samples
+            > len(self.audio_samples)
+            or
+            end_sample
+            > len(self.audio_samples)
+        ):
+
+            return float("inf")
+
+        start_audio = (
+            self.audio_samples[
+                start_sample:
+                start_sample
+                + window_samples
+            ]
+        )
+
+        end_audio = (
+            self.audio_samples[
+                end_sample
+                - window_samples:
+                end_sample
+            ]
+        )
+
+        # -------------------------------------------------
+        # Normalize local amplitude
+        # -------------------------------------------------
+
+        start_rms = np.sqrt(
+            np.mean(
+                start_audio ** 2
+            )
+            + 1e-12
+        )
+
+        end_rms = np.sqrt(
+            np.mean(
+                end_audio ** 2
+            )
+            + 1e-12
+        )
+
+        if (
+            start_rms > 1e-8
+            and end_rms > 1e-8
+        ):
+
+            normalized_start = (
+                start_audio
+                / start_rms
+            )
+
+            normalized_end = (
+                end_audio
+                / end_rms
+            )
+
+        else:
+
+            normalized_start = (
+                start_audio
+            )
+
+            normalized_end = (
+                end_audio
+            )
+
+        # -------------------------------------------------
+        # Waveform correlation
+        # -------------------------------------------------
+
+        correlation = np.corrcoef(
+            normalized_start,
+            normalized_end
+        )[0, 1]
+
+        if not np.isfinite(
+            correlation
+        ):
+
+            correlation = -1.0
+
+        correlation_score = (
+            1.0
+            - correlation
+        ) / 2.0
+
+        # -------------------------------------------------
+        # Amplitude difference
+        # -------------------------------------------------
+
+        amplitude_difference = abs(
+            start_rms
+            - end_rms
+        )
+
+        global_rms = (
+            np.mean(
+                np.abs(
+                    self.audio_samples
+                )
+            )
+            + 1e-8
+        )
+
+        amplitude_difference /= (
+            global_rms
+        )
+
+        # -------------------------------------------------
+        # Combined score
+        # -------------------------------------------------
+
+        return float(
+            correlation_score * 0.75
+            +
+            amplitude_difference * 0.25
+        )
+
+
+    # =====================================================
+    # SAMPLE-LEVEL REFINEMENT
+    # =====================================================
+
+    def refine_loop_samples(
+        self,
+        start_feature,
+        end_feature,
+        search_ms=50,
+        step_ms=2
+    ):
+        """
+        Refine the loop points using the original PCM
+        waveform.
+        """
+
+        hop_size = (
+            self.analysis_hop_size
+        )
+
+        approximate_start = (
+            start_feature
+            * hop_size
+        )
+
+        approximate_end = (
+            end_feature
+            * hop_size
+        )
+
+        search_samples = max(
+            1,
+            int(
+                self.rate
+                * search_ms
+                / 1000
+            )
+        )
+
+        step_samples = max(
+            1,
+            int(
+                self.rate
+                * step_ms
+                / 1000
+            )
+        )
+
+        best_start = (
+            approximate_start
+        )
+
+        best_end = (
+            approximate_end
+        )
+
+        best_score = float(
+            "inf"
+        )
+
+        # -------------------------------------------------
+        # Search local neighbourhood
+        # -------------------------------------------------
+
+        for start_offset in range(
+            -search_samples,
+            search_samples + 1,
+            step_samples
+        ):
+
+            candidate_start = (
+                approximate_start
+                + start_offset
+            )
+
+            if candidate_start < 1:
+                continue
+
+            for end_offset in range(
+                -search_samples,
+                search_samples + 1,
+                step_samples
+            ):
+
+                candidate_end = (
+                    approximate_end
+                    + end_offset
+                )
+
+                if (
+                    candidate_end
+                    <= candidate_start
+                ):
+
+                    continue
+
+                score = (
+                    self.sample_transition_score(
+                        candidate_start,
+                        candidate_end
+                    )
+                )
+
+                if score < best_score:
+
+                    best_score = score
+
+                    best_start = (
+                        candidate_start
+                    )
+
+                    best_end = (
+                        candidate_end
+                    )
+
+        return (
+            best_start,
+            best_end,
+            best_score
+        )
+
+
+    # =====================================================
+    # SAMPLE TO SECONDS
+    # =====================================================
+
+    def sample_to_seconds(
+        self,
+        sample
+    ):
+
+        return (
+            sample
+            / self.rate
+        )
+
+
+    # =====================================================
+    # SAMPLE TO FRAME
+    # =====================================================
+
+    def sample_to_frame(
+        self,
+        sample
+    ):
+        """
+        Convert a PCM sample position into the corresponding
+        mpg123 frame index.
+        """
+
+        if (
+            self.frame_start_samples is None
+            or len(
+                self.frame_start_samples
+            ) == 0
+        ):
+
+            raise RuntimeError(
+                "Frame sample index has not been built."
+            )
+
+        frame = np.searchsorted(
+            self.frame_start_samples,
+            sample,
+            side="right"
+        ) - 1
+
+        frame = max(
+            0,
+            min(
+                frame,
+                len(self.frames) - 1
+            )
+        )
+
+        return int(
+            frame
+        )
+
+
+    # =====================================================
+    # FRAME TO SAMPLES
+    # =====================================================
+
+    def frame_to_samples(
+        self,
+        frame
+    ):
+
+        if (
+            self.frame_start_samples is None
+        ):
+
+            self._build_frame_sample_index()
+
+        frame = max(
+            0,
+            min(
+                frame,
+                len(self.frames) - 1
+            )
+        )
+
+        return int(
+            self.frame_start_samples[
+                frame
+            ]
+        )
+
 
     # =====================================================
     # FRAME TO SECONDS
@@ -409,25 +1458,17 @@ class MusicFile:
         frame
     ):
 
-        samples_per_sec = (
-            self.rate
-            * self.channels
-        )
-
-        samples_per_frame = (
-            len(self.frames[1])
-            / 2
-        )
-
-        frames_per_sec = (
-            samples_per_sec
-            / samples_per_frame
+        sample = (
+            self.frame_to_samples(
+                frame
+            )
         )
 
         return (
-            frame
-            / frames_per_sec
+            sample
+            / self.rate
         )
+
 
     # =====================================================
     # FRAME TO TIME STRING
@@ -438,14 +1479,17 @@ class MusicFile:
         frame
     ):
 
-        time_sec = self.frame_to_seconds(
-            frame
+        time_sec = (
+            self.frame_to_seconds(
+                frame
+            )
         )
 
         return "{:02.0f}:{:06.3f}".format(
             time_sec // 60,
             time_sec % 60
         )
+
 
     # =====================================================
     # PLAY LOOP
@@ -481,6 +1525,7 @@ class MusicFile:
                     stop_event
                     and stop_event.is_set()
                 ):
+
                     break
 
                 out.play(
@@ -490,6 +1535,7 @@ class MusicFile:
                 i += 1
 
                 if i == loop_offset:
+
                     i = start_offset
 
         finally:
@@ -499,11 +1545,14 @@ class MusicFile:
             except Exception:
                 pass
 
+
     # =====================================================
     # FIND FFMPEG
     # =====================================================
 
-    def find_ffmpeg(self):
+    def find_ffmpeg(
+        self
+    ):
 
         ffmpeg_path = os.path.join(
             os.environ.get(
@@ -519,6 +1568,7 @@ class MusicFile:
         if os.path.isfile(
             ffmpeg_path
         ):
+
             return ffmpeg_path
 
         ffmpeg_path = "ffmpeg"
@@ -546,6 +1596,7 @@ class MusicFile:
                 "FFmpeg was not found."
             )
 
+
     # =====================================================
     # EXPORT LOOP
     # =====================================================
@@ -557,12 +1608,16 @@ class MusicFile:
         output_file
     ):
 
-        start_time = self.frame_to_seconds(
-            start_offset
+        start_time = (
+            self.frame_to_seconds(
+                start_offset
+            )
         )
 
-        loop_time = self.frame_to_seconds(
-            loop_offset
+        loop_time = (
+            self.frame_to_seconds(
+                loop_offset
+            )
         )
 
         loop_duration = (
@@ -571,21 +1626,27 @@ class MusicFile:
         )
 
         if loop_duration <= 0:
+
             raise ValueError(
                 "Invalid loop duration."
             )
 
-        output_directory = os.path.dirname(
-            output_file
+        output_directory = (
+            os.path.dirname(
+                output_file
+            )
         )
 
         if output_directory:
+
             os.makedirs(
                 output_directory,
                 exist_ok=True
             )
 
-        ffmpeg_path = self.find_ffmpeg()
+        ffmpeg_path = (
+            self.find_ffmpeg()
+        )
 
         subprocess.run(
             [
@@ -633,6 +1694,7 @@ def analyze_track(
     )
 
     if progress_callback:
+
         progress_callback(
             0,
             "Loading MP3..."
@@ -643,37 +1705,253 @@ def analyze_track(
     )
 
     if progress_callback:
+
         progress_callback(
             10,
             "MP3 loaded."
         )
 
-    track.calculate_max_frequencies(
+    # -----------------------------------------------------
+    # STEP 1
+    # STFT + RMS analysis
+    # -----------------------------------------------------
+
+    track.calculate_audio_features(
         progress_callback
     )
 
-    (
-        start_offset,
-        best_offset,
-        best_corr
-    ) = track.find_loop_point(
-        progress_callback=progress_callback
+    # -----------------------------------------------------
+    # STEP 2
+    # Candidate search
+    # -----------------------------------------------------
+
+    candidates = (
+        track.find_loop_candidates(
+            comparison_seconds=2.0,
+            minimum_loop_seconds=5.0,
+            maximum_candidates=10,
+            progress_callback=progress_callback
+        )
     )
 
-    if (
-        start_offset is None
-        or best_offset is None
-    ):
+    if not candidates:
+
         raise RuntimeError(
-            "Could not find a suitable loop point."
+            "Could not find suitable loop candidates."
         )
 
-    start_time = track.frame_to_seconds(
-        start_offset
+    # -----------------------------------------------------
+    # STEP 3
+    # Spectral transition refinement
+    # -----------------------------------------------------
+
+    print()
+    print(
+        "Refining loop candidates..."
     )
 
-    end_time = track.frame_to_seconds(
-        best_offset
+    refined_candidates = []
+
+    total_candidates = len(
+        candidates
+    )
+
+    for index, candidate in enumerate(
+        candidates,
+        start=1
+    ):
+
+        (
+            similarity,
+            start_feature,
+            end_feature
+        ) = candidate
+
+        (
+            refined_start,
+            refined_end,
+            transition_score
+        ) = track.refine_loop_candidate(
+            start_feature,
+            end_feature
+        )
+
+        refined_candidates.append(
+            (
+                transition_score,
+                similarity,
+                refined_start,
+                refined_end
+            )
+        )
+
+        progress = (
+            index
+            / total_candidates
+        ) * 100
+
+        print(
+            f"\rRefining candidates: "
+            f"{progress:6.1f}%",
+            end="",
+            flush=True
+        )
+
+    print()
+
+    # -----------------------------------------------------
+    # Sort by transition quality
+    # -----------------------------------------------------
+
+    refined_candidates.sort(
+        key=lambda candidate: (
+            candidate[0]
+        )
+    )
+
+    # -----------------------------------------------------
+    # STEP 4
+    # Sample-level refinement
+    # -----------------------------------------------------
+
+    print()
+    print(
+        "Performing sample-level refinement..."
+    )
+
+    best_result = None
+
+    best_final_score = float(
+        "inf"
+    )
+
+    total_candidates = len(
+        refined_candidates
+    )
+
+    for index, candidate in enumerate(
+        refined_candidates,
+        start=1
+    ):
+
+        (
+            transition_score,
+            similarity,
+            start_feature,
+            end_feature
+        ) = candidate
+
+        (
+            start_sample,
+            end_sample,
+            sample_score
+        ) = track.refine_loop_samples(
+            start_feature,
+            end_feature,
+            search_ms=50,
+            step_ms=2
+        )
+
+        # -------------------------------------------------
+        # Final score
+        #
+        # Similarity is rewarded.
+        # Transition smoothness is prioritized.
+        # -------------------------------------------------
+
+        final_score = (
+            sample_score
+            - (
+                similarity
+                * 0.10
+            )
+        )
+
+        if final_score < best_final_score:
+
+            best_final_score = (
+                final_score
+            )
+
+            best_result = {
+                "start_sample": start_sample,
+                "end_sample": end_sample,
+                "sample_score": sample_score,
+                "similarity": similarity,
+                "transition_score": transition_score
+            }
+
+        progress = (
+            index
+            / max(
+                1,
+                total_candidates
+            )
+        ) * 100
+
+        print(
+            f"\rSample refinement: "
+            f"{progress:6.1f}%",
+            end="",
+            flush=True
+        )
+
+    print()
+
+    if best_result is None:
+
+        raise RuntimeError(
+            "Could not refine a suitable loop."
+        )
+
+    # -----------------------------------------------------
+    # Convert sample positions to mpg123 frames
+    # -----------------------------------------------------
+
+    start_sample = (
+        best_result[
+            "start_sample"
+        ]
+    )
+
+    end_sample = (
+        best_result[
+            "end_sample"
+        ]
+    )
+
+    start_offset = (
+        track.sample_to_frame(
+            start_sample
+        )
+    )
+
+    end_offset = (
+        track.sample_to_frame(
+            end_sample
+        )
+    )
+
+    if end_offset <= start_offset:
+
+        raise RuntimeError(
+            "The detected loop points are invalid."
+        )
+
+    # -----------------------------------------------------
+    # Exact times from PCM
+    # -----------------------------------------------------
+
+    start_time = (
+        track.sample_to_seconds(
+            start_sample
+        )
+    )
+
+    end_time = (
+        track.sample_to_seconds(
+            end_sample
+        )
     )
 
     duration = (
@@ -681,20 +1959,74 @@ def analyze_track(
         - start_time
     )
 
+    if duration <= 0:
+
+        raise RuntimeError(
+            "The detected loop duration is invalid."
+        )
+
+    # -----------------------------------------------------
+    # Final result
+    # -----------------------------------------------------
+
     if progress_callback:
+
         progress_callback(
             100,
             "Loop found."
         )
 
+    print()
+    print(
+        "Loop analysis complete."
+    )
+
+    print(
+        f"Start: {start_time:.3f}s"
+    )
+
+    print(
+        f"End: {end_time:.3f}s"
+    )
+
+    print(
+        f"Duration: {duration:.3f}s"
+    )
+
+    print(
+        f"Similarity: "
+        f"{best_result['similarity'] * 100:.1f}%"
+    )
+
+    print(
+        f"Transition score: "
+        f"{best_result['sample_score']:.6f}"
+    )
+
     return {
         "track": track,
+
+        # mpg123 frame positions
         "start_offset": start_offset,
-        "end_offset": best_offset,
+        "end_offset": end_offset,
+
+        # Exact PCM positions
+        "start_sample": start_sample,
+        "end_sample": end_sample,
+
+        # Exact times
         "start": start_time,
         "end": end_time,
         "duration": duration,
-        "match": best_corr
+
+        # Quality information
+        "match": best_result[
+            "similarity"
+        ],
+
+        "transition_score": best_result[
+            "sample_score"
+        ]
     }
 
 
@@ -752,9 +2084,20 @@ if __name__ == "__main__":
 
         sys.exit(1)
 
-    result = analyze_track(
-        filename
-    )
+    try:
+
+        result = analyze_track(
+            filename
+        )
+
+    except Exception as error:
+
+        print()
+        print(
+            f"Error: {error}"
+        )
+
+        sys.exit(1)
 
     print()
     print(
@@ -763,23 +2106,31 @@ if __name__ == "__main__":
 
     print(
         "Loop starts at: {}".format(
-            result["track"].time_of_frame(
-                result["start_offset"]
-            )
+            result["start"]
         )
     )
 
     print(
         "Loop returns at: {}".format(
-            result["track"].time_of_frame(
-                result["end_offset"]
-            )
+            result["end"]
         )
     )
 
     print(
-        "Match: {:.0f}%".format(
+        "Duration: {:.3f}s".format(
+            result["duration"]
+        )
+    )
+
+    print(
+        "Similarity: {:.1f}%".format(
             result["match"] * 100
+        )
+    )
+
+    print(
+        "Transition score: {:.6f}".format(
+            result["transition_score"]
         )
     )
 
@@ -792,3 +2143,4 @@ if __name__ == "__main__":
         result["start_offset"],
         result["end_offset"]
     )
+
